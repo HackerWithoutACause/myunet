@@ -27,10 +27,15 @@ def convolution(filters, index, place):
         padding='same'
     )
 
-def stage(filters, index, input):
-    c1 = convolution(filters, index, 'first')(input)
-    d = layers.Dropout(0.1)(c1)
-    return convolution(filters, index, 'second')(d)
+class UNetStage(keras.layers.Layer):
+    def __init__(self, filters, index):
+        super().__init__()
+        self.c1 = convolution(filters, index, 'first')
+        self.dropout = layers.Dropout(0.1)
+        self.c2 = convolution(filters, index, 'second')
+
+    def call(self, inputs):
+        return self.c2(self.dropout(self.c1(inputs)))
 
 def expansive(stright, cross, filters, index):
     transposed = layers.Conv2DTranspose(filters, (2, 2), strides=(2, 2), padding='same')(stright)
@@ -39,10 +44,10 @@ def expansive(stright, cross, filters, index):
     drop = layers.Dropout(0.2, name='Dropout-%d' % index)(cv1)
     return convolution(filters, index, 'expansive-second')(drop)
 
-stages = [stage(16, 0, normalized)]
+stages = [UNetStage(16, 0)(normalized)]
 for i, filters in enumerate(range(5, 9)):
     pooling = layers.MaxPooling2D(pool_size=(2, 2))(stages[-1])
-    stages.append(stage(2 ** filters, i + 1, pooling))
+    stages.append(UNetStage(2 ** filters, i + 1)(pooling))
 
 reversed = iter(reversed(stages))
 last = next(reversed)
@@ -57,9 +62,9 @@ model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy']
 
 def load_image_and_mask(image_path, mask_path):
     img = imread(image_path)
-    img = resize(img, DIMENSIONS[:2], mode='constant', preserve_range=True)
+    img = resize(img, DIMENSIONS, mode='constant', preserve_range=True)
     mask = imread(mask_path)
-    mask = resize(mask, DIMENSIONS[:2], mode='constant', preserve_range=True)
+    mask = resize(mask, (*DIMENSIONS[:2], 1), mode='constant', preserve_range=True)
     return (img, mask)
 
 if len(sys.argv) < 2:
@@ -71,10 +76,10 @@ elif sys.argv[1] == 'train':
     image_names = [name.split('.')[0] for name in next(os.walk(images_path))[2]]
 
     images = np.zeros((len(image_names), *DIMENSIONS), dtype=np.uint8)
-    masks = np.zeros((len(image_names), *DIMENSIONS[:2]), dtype=bool)
+    masks = np.zeros((len(image_names), *(*DIMENSIONS[:2], 1)), dtype=bool)
 
     for n, id in tqdm(enumerate(image_names), total=len(image_names)):
-        (images[n], masks[n]) = load_image_and_mask(images_path + id + '.tiff', mask_path + id + '.tif')
+        (images[n], masks[n]) = load_image_and_mask(images_path + id + '.png', mask_path + id + '_seg0.png')
 
     callbacks = [
         keras.callbacks.ModelCheckpoint('model.h5', verbose=1, save_best_only=True),
@@ -83,12 +88,16 @@ elif sys.argv[1] == 'train':
     ]
     results = model.fit(images, masks, validation_split=0.1, batch_size=15, epochs=25, callbacks=callbacks)
 elif sys.argv[1] == 'run':
+    model.load_weights('model.h5')
     img = imread(sys.argv[2])
-    img = resize(img, DIMENSIONS[:2], mode='constant', preserve_range=True)
-    mask = model(np.expand_dims(img, axis=0))
-    # mask = np.random.choice([True, False], size=(128, 128, 1))
-    print(mask)
-    imsave('output.png', (np.squeeze(mask) * 255).astype(np.uint8))
-
+    img = resize(img, DIMENSIONS[:2], mode='constant', preserve_range=True)[:, :, :3]
+    imsave('input.png', img.astype(np.uint8))
+    img = np.expand_dims(img, axis=0)
+    mask = model(img, training=False)
+    threshold = 0.5
+    mask = np.where(mask >= threshold, 1, 0)
+    imsave('output.png', np.squeeze(mask * 255).astype(np.uint8))
+elif sys.argv[1] == 'summary':
+    model.summary()
 else:
     print('Error: Add argument of train or run')
